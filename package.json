@@ -1,0 +1,22 @@
+{
+  "name": "maidiscord",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@discordjs/rest": "^2.5.0",
+    "@supabase/supabase-js": "^2.49.4",
+    "discord-api-types": "^0.38.2",
+    "discord.js": "^14.19.2",
+    "dotenv": "^16.5.0",
+    "node-fetch": "^3.3.2",
+    "nodemon": "^3.1.10"
+  }
+}
