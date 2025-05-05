@@ -37,7 +37,7 @@ const commands = [
     .setName('myid')
     .setDescription("Display your Discord user ID")
 ].map(command => command.toJSON());
-
+  
 // Register slash commands on bot ready
 client.once('ready', async () => {
   console.log(`Mai bot is online as ${client.user.tag}`);
