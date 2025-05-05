@@ -27,7 +27,15 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName('removechannel')
-    .setDescription('Remove the channel where Mai responds')
+    .setDescription('Remove a specific channel where Mai responds')
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('The text channel to remove')
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName('myid')
+    .setDescription("Display your Discord user ID")
 ].map(command => command.toJSON());
 
 // Register slash commands on bot ready
@@ -77,17 +85,34 @@ client.on('interactionCreate', async interaction => {
     });
 
   } else if (interaction.commandName === 'removechannel') {
-    await supabase
+    const channel = interaction.options.getChannel('channel');
+
+    const { error } = await supabase
       .from('guild_channel_settings')
       .delete()
-      .eq('guild_id', guildId);
+      .match({ guild_id: guildId, channel_id: channel.id });
 
-    guildChannelMap.delete(guildId);
+    if (!error) {
+      if (guildChannelMap.get(guildId) === channel.id) {
+        guildChannelMap.delete(guildId);
+      }
 
-    console.log(`Removed channel for guild ${guildId}`);
+      console.log(`Removed channel ${channel.id} for guild ${guildId}`);
+      await interaction.reply({
+        content: `❌ Mai will no longer respond in <#${channel.id}>.`,
+        ephemeral: true
+      });
+    } else {
+      console.error("Failed to remove channel:", error.message);
+      await interaction.reply({
+        content: `⚠️ Could not remove channel. Please try again later.`,
+        ephemeral: true
+      });
+    }
 
+  } else if (interaction.commandName === 'myid') {
     await interaction.reply({
-      content: `❌ Mai will no longer respond in any channel.`,
+      content: `👤 Your Discord ID is: \`${interaction.user.id}\``,
       ephemeral: true
     });
   }
@@ -101,21 +126,6 @@ client.on('messageCreate', async message => {
   if (!targetChannelId || message.channel.id !== targetChannelId) return;
 
   try {
-    // 👇 Fetch last 10 messages from Supabase for this Discord user
-    const { data: history, error } = await supabase
-      .from('discord_messages')
-      .select('role, content')
-      .eq('discord_user_id', `discord:${message.author.id}`)
-      .order('id', { ascending: false })
-      .limit(10);
-
-    const shortTermMemory = (history || [])
-      .reverse() // oldest to newest
-      .map(m => ({
-        role: m.role === 'mai' ? 'assistant' : 'user',
-        content: m.content
-      }));
-
     const res = await fetch(process.env.NEXT_API_URL, {
       method: 'POST',
       headers: {
@@ -134,7 +144,7 @@ client.on('messageCreate', async message => {
           intrusiveness: 1,
           requiresTeasing: false
         },
-        shortTermMemory
+        shortTermMemory: []
       })
     });
 
@@ -149,6 +159,5 @@ client.on('messageCreate', async message => {
     message.channel.send("Error reaching Mai's brain 😵‍💫");
   }
 });
-
 
 client.login(process.env.DISCORD_TOKEN);
