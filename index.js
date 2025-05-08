@@ -1,130 +1,119 @@
+// bot.js
 require('dotenv').config();
+
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const { createClient } = require('@supabase/supabase-js');
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const cron = require('node-cron');
 
+// Supabase client (service role key for server-side operations)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+// 1) Create Discord client with DM intents & partials
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.Guilds,           // needed to register slash commands
+    GatewayIntentBits.MessageContent,   // read message content
+    GatewayIntentBits.DirectMessages    // handle DMs
+  ],
+  partials: ['CHANNEL']                // allow DM channel partials
 });
 
-// In-memory map to store channel preferences per guild
-const guildChannelMap = new Map();
-
-// Define slash commands
+// 2) Define slash commands (only /myid for DM users)
 const commands = [
-  new SlashCommandBuilder()
-    .setName('setchannel')
-    .setDescription('Set the channel where Mai should respond')
-    .addChannelOption(option =>
-      option.setName('channel')
-        .setDescription('The text channel')
-        .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName('removechannel')
-    .setDescription('Remove a specific channel where Mai responds')
-    .addChannelOption(option =>
-      option.setName('channel')
-        .setDescription('The text channel to remove')
-        .setRequired(true)
-    ),
   new SlashCommandBuilder()
     .setName('myid')
     .setDescription("Display your Discord user ID")
-].map(command => command.toJSON());
-  
-// Register slash commands on bot ready
+].map(cmd => cmd.toJSON());
+
+// 3) On ready: register slash commands and start reminder cron
 client.once('ready', async () => {
   console.log(`Mai bot is online as ${client.user.tag}`);
 
+  // Register global slash commands
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  const appId = (await rest.get('/oauth2/applications/@me')).id;
+  const app = await rest.get('/oauth2/applications/@me');
+  await rest.put(Routes.applicationCommands(app.id), { body: commands });
+  console.log('✅ Slash commands registered');
 
-  try {
-    await rest.put(Routes.applicationCommands(appId), { body: commands });
-    console.log('✅ Slash commands registered');
-  } catch (err) {
-    console.error('Failed to register commands:', err);
-  }
+  // Schedule the 24‑hour DM reminder job (runs at minute 0 of every hour)
+  cron.schedule('0 * * * *', async () => {
+    console.log('🔔 Running reminder cron…');
+    const { data: links, error: linkErr } = await supabase
+      .from('discord_user_links')
+      .select('discord_user_id');
+    if (linkErr) return console.error('Could not load discord_user_links:', linkErr);
 
-  // Load all saved channels from Supabase
-  const { data, error } = await supabase.from('guild_channel_settings').select('*');
-  if (data) {
-    for (const row of data) {
-      guildChannelMap.set(row.guild_id, row.channel_id);
+    for (const { discord_user_id: userId } of links) {
+      try {
+        const { data: msgs } = await supabase
+          .from('discord_messages')
+          .select('emotion, created_at')
+          .eq('discord_user_id', userId)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (!msgs?.length) continue;
+        const last = msgs[0];
+        const age = Date.now() - new Date(last.created_at).getTime();
+        if (age < ONE_DAY_MS) continue;
+
+        const templates = {
+          Angry:   `Hey… I remember you seemed upset last time. I’m here if you want to talk.`,
+          Sad:     `You sounded a bit down yesterday. Want to chat and cheer up?`,
+          Happy:   `You were in a great mood last time—miss that energy!`,
+          Flirty:  `I’ve been thinking about you… care to continue where we left off?`,
+          Normal:  `It’s been a while! Curious what’s on your mind today.`,
+          Loving:  `Feeling affectionate—is there something you want to share?`,
+          Excited: `You were excited last time—got any new fun stories?`
+        };
+        const text = templates[last.emotion] || templates.Normal;
+
+        const user = await client.users.fetch(userId);
+        await user.send({ content: `${text}\n\n💬 Come chat with me!` });
+        console.log(`Reminder sent to ${userId} (last emotion=${last.emotion})`);
+      } catch (err) {
+        console.error(`Failed to send reminder to ${userId}:`, err);
+      }
     }
-    console.log('✅ Loaded saved channel settings from Supabase');
-  }
+  });
 });
 
-// Slash command interaction handler
+// 4) Handle slash commands (only /myid)
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const guildId = interaction.guildId;
-
-  if (interaction.commandName === 'setchannel') {
-    const channel = interaction.options.getChannel('channel');
-
-    await supabase
-      .from('guild_channel_settings')
-      .upsert({ guild_id: guildId, channel_id: channel.id });
-
-    guildChannelMap.set(guildId, channel.id);
-
-    console.log(`Set channel for guild ${guildId}: ${channel.id}`);
-
-    await interaction.reply({
-      content: `✅ Mai will now respond in <#${channel.id}>`,
-      ephemeral: true
-    });
-
-  } else if (interaction.commandName === 'removechannel') {
-    const channel = interaction.options.getChannel('channel');
-
-    const { error } = await supabase
-      .from('guild_channel_settings')
-      .delete()
-      .match({ guild_id: guildId, channel_id: channel.id });
-
-    if (!error) {
-      if (guildChannelMap.get(guildId) === channel.id) {
-        guildChannelMap.delete(guildId);
-      }
-
-      console.log(`Removed channel ${channel.id} for guild ${guildId}`);
-      await interaction.reply({
-        content: `❌ Mai will no longer respond in <#${channel.id}>.`,
-        ephemeral: true
-      });
-    } else {
-      console.error("Failed to remove channel:", error.message);
-      await interaction.reply({
-        content: `⚠️ Could not remove channel. Please try again later.`,
-        ephemeral: true
-      });
-    }
-
-  } else if (interaction.commandName === 'myid') {
-    await interaction.reply({
-      content: `👤 Your Discord ID is: \`${interaction.user.id}\``,
-      ephemeral: true
-    });
+  if (interaction.commandName === 'myid') {
+    await interaction.reply({ content: `👤 Your Discord ID is: \`${interaction.user.id}\``, ephemeral: true });
   }
 });
 
-// Bot message handler
+// 5) Handle incoming DMs only
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
-  const targetChannelId = guildChannelMap.get(message.guildId);
-  if (!targetChannelId || message.channel.id !== targetChannelId) return;
+  // ignore guild channels
+  if (message.channel.type !== 'DM') return;
 
+  // verify link exists
+  const { data: link } = await supabase
+    .from('discord_user_links')
+    .select('discord_user_id')
+    .eq('discord_user_id', message.author.id)
+    .single();
+
+  if (!link) {
+    return message.channel.send(
+      "🚧 Please link your account first in the web app before chatting here."
+    );
+  }
+
+  // forward to Next.js chat API
   try {
     const res = await fetch(process.env.NEXT_API_URL, {
       method: 'POST',
@@ -135,29 +124,17 @@ client.on('messageCreate', async message => {
       body: JSON.stringify({
         userId: `discord:${message.author.id}`,
         message: message.content,
-        emotionalState: {
-          emotion: "Normal",
-          intensity: 3,
-          affectionLevel: 50,
-          trustLevel: 50,
-          interactionCount: 0,
-          intrusiveness: 1,
-          requiresTeasing: false
-        },
+        emotionalState: { emotion: 'Normal', intensity: 3, affectionLevel: 50, trustLevel: 50, interactionCount: 0, intrusiveness: 1, requiresTeasing: false },
         shortTermMemory: []
       })
     });
-
     const data = await res.json();
-    if (data?.message) {
-      message.channel.send(data.message);
-    } else {
-      message.channel.send("Something went wrong talking to Mai.");
-    }
-  } catch (e) {
-    console.error("API error:", e);
-    message.channel.send("Error reaching Mai's brain 😵‍💫");
+    await message.channel.send(data.message || "Something went wrong talking to Mai.");
+  } catch (err) {
+    console.error('API error:', err);
+    await message.channel.send("Error reaching Mai's brain 😵‍💫");
   }
 });
 
+// 6) Log in
 client.login(process.env.DISCORD_TOKEN);
